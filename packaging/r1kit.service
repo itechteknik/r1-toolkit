@@ -1,0 +1,18 @@
+[Unit]
+Description=Orange Pi R1 Toolkit (router / AP / captive portal)
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/opt/r1kit
+ExecStart=/usr/bin/python3 -m r1kit daemon
+Restart=on-failure
+RestartSec=3
+# Alt surecler (hostapd/dnsmasq/udhcpc) daemon ile birlikte kapanir
+KillMode=control-group
+LimitNOFILE=4096
+MemoryMax=96M
+
+[Install]
+WantedBy=multi-user.target
