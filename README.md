@@ -51,6 +51,15 @@ Arayüz rolleri (`Arayüzler` sekmesi): `wan` · `lan` · `ap` · `sta` (Wi-Fi u
 
 Yeni skill eklemek için `.claude/skills/r1-toolkit/SKILL.md` ve `r1kit/skills/qos.py` örneğine bakın.
 
+## Dinamik yönetim (donanım/panel her zaman güncel)
+Cihazı elden ele dolaştırırken veya USB Ethernet/Wi-Fi dongle takıp çıkarırken yeniden başlatmaya gerek kalmaz:
+
+- **Otomatik donanım algılama:** çalışırken takılan/çıkarılan her USB Ethernet/Wi-Fi arayüzü ~3 sn içinde algılanır, yapılandırmaya `unused` rolüyle otomatik eklenir ve panelde anında görünür (rol ataması yine sizindir — hiçbir şey otomatik devreye alınmaz). Çıkarılan arayüzün rolü/SSID'si korunur, tekrar takıldığında elden çıkmaz.
+- **`http://<ad>.local/` ile erişim:** cihaz kendi hafif mDNS yanıtlayıcısıyla (`r1kit/mdns.py`) `http://r1.local/` gibi bir adı yayınlar; IP adresini bulmaya/hatırlamaya gerek kalmaz (Sistem sekmesinde gösterilir).
+- **Canlı panel (Server-Sent Events):** durum, olay kaydı ve uplink bilgisi artık 5 sn'lik yoklama yerine `/api/events` üzerinden anlık akar (bağlantı 1-2 sn'de bir yenilenir; kopukluk olursa otomatik yeniden dener ve yoklamaya geri düşer). Üstte "● canlı" rozeti bağlantı durumunu gösterir.
+- **Bağlantı QR kodları:** Arayüzler sekmesinde her AP için "Bağlantı QR kodu göster" ile telefonla okutup doğrudan o Wi-Fi'a bağlanma; Sistem sekmesinde panelin kendisini açan QR. Tamamen bağımsız, stdlib-only bir QR üretici ile (`r1kit/qrcode.py`) üretilir - harici pakete ihtiyaç yoktur.
+- **Sistem olay günlüğü:** donanım takma/çıkarma, her `apply()`, onaylanmayan güvenli uygulamaların geri alınması Panel sekmesinde zaman damgalı olarak listelenir.
+
 ## Güvenlik
 - Yönetici parolası PBKDF2-SHA256; oturum çerezi `HttpOnly; SameSite=Strict`, değiştiren isteklerde CSRF başlığı, başarısız girişte 5 dk kilit.
 - WAN'dan varsayılan olarak hiçbir servis açık değildir (panel için `wan_access` açıkça açılmalıdır). Panel HTTP'dir; yönetimi güvenilir LAN'da yapın veya VPN kullanın.
@@ -65,6 +74,6 @@ r1kit render nft|dnsmasq|files|cmds     # uygulamadan üretilecekleri göster
 ```
 
 ## Geliştirme
-Cihaz olmadan çalışır (`R1KIT_DRY=1 R1KIT_FAKE_HW=1`, bkz. skill dosyası). `python3 -m pytest -q tests` — render, `nft -c` sözdizimi, doğrulama, auth, HTTP akışı, portal DNS ve Wi-Fi tarama ayrıştırıcısını test eder.
+Cihaz olmadan çalışır (`R1KIT_DRY=1 R1KIT_FAKE_HW=1`, bkz. skill dosyası). `python3 -m pytest -q tests` — render, `nft -c` sözdizimi, doğrulama, auth, HTTP akışı, portal DNS, hot-plug algılama, SSE ve Wi-Fi tarama ayrıştırıcısını test eder. QR üreticinin uçtan uca testleri `opencv-python-headless` + `numpy` kuruluysa gerçek bir QR çözücüyle doğrulama yapar (kurulu değilse otomatik atlanır, cihazda gerekmez — `r1kit/qrcode.py` stdlib-only'dir).
 
 > Bu kod, gerçek R1 donanımında test edilmeden önce yazılmıştır: ilk kurulumda `r1kit doctor` çıktısına ve panelin "Güvenli Uygula" akışına güvenin.

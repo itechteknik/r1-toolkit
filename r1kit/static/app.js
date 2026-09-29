@@ -1,6 +1,6 @@
 'use strict';
 // Yonetim paneli. Tum dinamik metin textContent ile eklenir (XSS'e karsi innerHTML kullanilmaz).
-const S = {must: false, csrf: null, cfg: null, hw: [], schema: null, status: null, tab: 'dash', dirty: false, timer: null};
+const S = {must: false, csrf: null, cfg: null, hw: [], schema: null, status: null, tab: 'dash', dirty: false, timer: null, live: false, es: null};
 const $ = s => document.querySelector(s);
 const h = (t, a, ...c) => {
   const e = document.createElement(t);
@@ -15,7 +15,7 @@ async function api(path, method = 'GET', body) {
   const r = await fetch('/api/' + path, {method, headers: {'Content-Type': 'application/json', 'X-CSRF': S.csrf || ''}, body: body ? JSON.stringify(body) : undefined});
   const ct = r.headers.get('content-type') || '';
   const j = ct.includes('json') ? await r.json() : await r.blob();
-  if (!r.ok) { if (r.status === 401) { S.csrf = null; render(); } throw new Error(j.error || r.status); }
+  if (!r.ok) { if (r.status === 401) { stopSSE(); S.csrf = null; render(); } throw new Error(j.error || r.status); }
   return j;
 }
 const fmtBps = b => b > 1e6 ? (b / 1e6).toFixed(1) + ' Mbit/s' : b > 1e3 ? (b / 1e3).toFixed(0) + ' kbit/s' : Math.round(b) + ' bit/s';
@@ -66,7 +66,9 @@ async function render() {
   const app = $('#app'); app.replaceChildren();
   if (!S.csrf) return login(app);
   if (S.must) S.tab = 'system';
-  app.append(h('header', {}, h('h1', {textContent: 'Orange Pi R1 Toolkit'}), h('button', {class: 'b s', textContent: 'Cikis', onclick: async () => { await api('logout', 'POST', {}); S.csrf = null; render(); }})),
+  app.append(h('header', {}, h('h1', {textContent: 'Orange Pi R1 Toolkit'}),
+      h('span', {id: 'live', class: 'tag ' + (S.live ? 'ok' : 'bad'), textContent: S.live ? '● canli' : '○ bagli degil'}),
+      h('button', {class: 'b s', textContent: 'Cikis', onclick: async () => { stopSSE(); await api('logout', 'POST', {}); S.csrf = null; render(); }})),
     h('nav', {}, TABS.filter(t => !S.must || t[0] === 'system').map(([k, l]) => h('button', {class: S.tab === k ? 'on' : '', textContent: l, onclick: () => { S.tab = k; render(); }}))),
     h('div', {id: 'banner'}), h('main', {id: 'main'}));
   banner();
@@ -83,7 +85,7 @@ async function refresh(rerender = true) {
 function login(app) {
   const pw = h('input', {type: 'password', placeholder: 'Yonetici parolasi', autofocus: true});
   const go = async () => {
-    try { const r = await api('login', 'POST', {password: pw.value}); S.csrf = r.csrf; S.cfg = null; S.must = r.must_change; await render(); if (r.must_change) toast('Ilk giris: lutfen parolayi degistirin'); }
+    try { const r = await api('login', 'POST', {password: pw.value}); S.csrf = r.csrf; S.cfg = null; S.must = r.must_change; await render(); connectSSE(); if (r.must_change) toast('Ilk giris: lutfen parolayi degistirin'); }
     catch (e) { toast(e.message); }
   };
   pw.addEventListener('keydown', e => e.key === 'Enter' && go());
@@ -117,7 +119,8 @@ const VIEWS = {
         h('h3', {textContent: 'Olaylar'}), h('pre', {textContent: st.uplinks.events.map(e => new Date(e.t * 1000).toLocaleTimeString() + '  ' + e.msg).join('\n') || '-'})),
       card('Trafik (son 10 dk)', [...ifs].map(i => h('div', {}, h('div', {class: 'mut', textContent: i + '  ↓ ' + fmtBps(m.samples.at(-1).rates[i]?.rx || 0) + '  ↑ ' + fmtBps(m.samples.at(-1).rates[i]?.tx || 0)}),
         spark(m.samples.map(s => (s.rates[i]?.rx || 0) + (s.rates[i]?.tx || 0)))))),
-      card('Servisler', table(['Surec', 'Durum'], Object.entries(st.procs).map(([k, v]) => [k, tag(v, v === 'running' ? 'ok' : 'bad')]))));
+      card('Servisler', table(['Surec', 'Durum'], Object.entries(st.procs).map(([k, v]) => [k, tag(v, v === 'running' ? 'ok' : 'bad')]))),
+      card('Sistem olaylari (donanim takma/cikarma, uygulama, vb.)', h('pre', {textContent: (st.events || []).map(e => new Date(e.t * 1000).toLocaleTimeString() + '  ' + e.msg).join('\n') || '-'})));
   },
 
   async ifaces() {
@@ -149,8 +152,12 @@ const VIEWS = {
       const role = h('select', {onchange: e => { spec.role = e.target.value; S.dirty = true; if (spec.role === 'lan' || spec.role === 'ap') spec.network = spec.network || nets[0]; draw(); banner(); }},
         S.schema.roles.map(r => h('option', {value: r, selected: r === spec.role, textContent: r})));
       const w = hw && hw.wifi;
+      const qr = h('div', {});
+      const showQr = () => { qr.replaceChildren(h('div', {class: 'mut', textContent: 'Telefonla okutup dogrudan baglanin (en son kaydedilen ayarlari gosterir):'}),
+        h('img', {src: '/api/qr/wifi/' + encodeURIComponent(name) + '.svg?t=' + Date.now(), style: 'width:170px;height:170px;background:#fff;border-radius:8px;padding:6px', alt: 'Wi-Fi baglanti QR kodu'})); };
       return card(name, hw ? h('div', {class: 'mut', textContent: `${hw.type} • ${hw.bus} • ${hw.driver || '?'} • ${hw.mac} • ${hw.carrier ? 'link var' : 'link yok'}${hw.speed ? ' • ' + hw.speed + 'Mb' : ''}` + (w ? ` • modlar: ${w.modes.join('/')} • AP+STA eszamanli: ${w.ap_sta_concurrent ? 'evet' : 'hayir'}` : '')}) : h('div', {class: 'mut', textContent: 'sanal arayuz'}),
         h('label', {textContent: 'Rol'}), role, body,
+        spec.role === 'ap' ? h('button', {class: 'b s', textContent: 'Baglanti QR kodu goster', onclick: showQr}) : null, qr,
         !hw ? h('button', {class: 'b d', textContent: 'Sil', onclick: () => { delete ifs[name]; S.dirty = true; render(); }}) : null);
     };
     const addv = h('div', {class: 'row'}, h('input', {id: 'vname', placeholder: 'yeni sanal arayuz adi (orn. ap0)'}), h('input', {id: 'vpar', placeholder: 'ana wifi (orn. wlan0)'}),
@@ -249,6 +256,8 @@ const VIEWS = {
     const pwCard = card('Parola', S.must ? h('div', {class: 'warn', textContent: 'Ilk giris: devam etmek icin yonetici parolasini degistirin.'}) : null, h('div', {class: 'row'}, old, nw, h('button', {class: 'b', textContent: 'Degistir', onclick: async () => { try { await api('password', 'POST', {old: old.value, new: nw.value}); toast('Parola degisti, tekrar giris yapin'); S.csrf = null; S.must = false; render(); } catch (e) { toast(e.message); } }})));
     if (S.must) return h('div', {}, pwCard);
     return h('div', {}, pwCard,
+      card('Panele hizli erisim', S.status.mdns ? h('div', {class: 'mut', textContent: 'Bu ag icindeyken IP ezberlemeden: http://' + S.status.mdns + '/'}) : h('div', {class: 'mut', textContent: 'mDNS calismiyor; panele bridge IP adresinden erisin.'}),
+        h('img', {src: '/api/qr/panel.svg?t=' + Date.now(), style: 'width:150px;height:150px;background:#fff;border-radius:8px;padding:6px', alt: 'Panel QR kodu'})),
       card('Senaryolar (hazir kurulumlar)', S.schema.presets.map(p => h('div', {}, h('b', {textContent: p.title}), h('div', {class: 'mut', textContent: p.desc}),
         h('button', {class: 'b s', textContent: 'Yukle', onclick: async () => { if (!confirm('Arayuz/ag ayarlariniz bu senaryoyla degistirilecek (uygulamadan once kaydedilir). Devam?')) return; try { await api('preset', 'POST', {name: p.name}); S.cfg = null; S.dirty = false; toast('Yuklendi; Guvenli Uygula ile devreye alin'); await refresh(false); S.dirty = true; render(); } catch (e) { toast(e.message); } }}), h('hr')))),
       card('Genel', field(F('hostname', 'Ad'), sys), field(F('country', 'Ulke kodu (Wi-Fi duzenlemesi)'), sys), field(F('domain', 'Yerel alan adi'), sys),
@@ -263,5 +272,26 @@ const VIEWS = {
   },
 };
 
-setInterval(async () => { if (S.csrf) { try { const st = await api('state'); const had = S.status && S.status.pending_confirm > 0; S.status = st.status; banner(); if (had && !st.status.pending_confirm) render(); if (S.tab === 'dash' && !document.hidden) { $('#main').replaceChildren(await VIEWS.dash()); } } catch {} } }, 5000);
-(async () => { try { const s = await api('session'); if (s.logged_in) { S.csrf = s.csrf; S.must = s.must_change; } } catch {} render(); })();
+// Canli guncellemeler: /api/events (Server-Sent Events) durumu ~2sn'de bir, donanim
+// takilip cikarildiginda ('hotplug') ise aninda gonderir. Baglanti koparsa 3sn sonra
+// yeniden dener ve o araliktaki tekrar denemelerde 5sn'lik yoklamaya geri duser.
+let sseRetryTimer = null, pollTimer = null;
+function setLive(v) { if (S.live !== v) { S.live = v; const el = $('#live'); if (el) { el.className = 'tag ' + (v ? 'ok' : 'bad'); el.textContent = v ? '● canli' : '○ bagli degil'; } } }
+function connectSSE() {
+  if (!S.csrf || typeof EventSource === 'undefined') return pollFallback();
+  stopSSE();
+  const es = new EventSource('/api/events');
+  es.addEventListener('status', e => { setLive(true); clearInterval(pollTimer); applyStatus(JSON.parse(e.data)); });
+  es.addEventListener('hotplug', e => { const ev = JSON.parse(e.data); toast(ev.msg); if (['ifaces', 'dash', 'wan'].includes(S.tab)) render(); });
+  es.onerror = () => { setLive(false); es.close(); S.es = null; pollFallback(); sseRetryTimer = setTimeout(connectSSE, 3000); };
+  S.es = es;
+}
+function stopSSE() { if (S.es) { S.es.close(); S.es = null; } clearTimeout(sseRetryTimer); clearInterval(pollTimer); setLive(false); }
+function pollFallback() { if (pollTimer) return; pollTimer = setInterval(async () => { if (S.csrf) { try { applyStatus((await api('state')).status); } catch {} } }, 5000); }
+async function applyStatus(status) {
+  const had = S.status && S.status.pending_confirm > 0;
+  S.status = status; banner();
+  if (had && !status.pending_confirm) render();
+  if (S.tab === 'dash' && !document.hidden) { const m = $('#main'); m && m.replaceChildren(await VIEWS.dash()); }
+}
+(async () => { try { const s = await api('session'); if (s.logged_in) { S.csrf = s.csrf; S.must = s.must_change; } } catch {} render(); if (S.csrf) connectSSE(); })();

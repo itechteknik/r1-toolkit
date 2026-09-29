@@ -195,3 +195,100 @@ def test_default_for_minimal_hardware():
     c = presets.default_for(["eth0"], [])
     assert c["interfaces"] == {"eth0": {"role": "lan", "network": "lan"}}
     assert config.validate(c) == []
+
+
+def test_hotplug_detects_new_and_removed_interface(monkeypatch):
+    from r1kit import netdev as netdev_mod
+    from r1kit.runtime import Runtime
+    rt = Runtime()
+    base = netdev_mod.list_interfaces()
+    monkeypatch.setattr(netdev_mod, "list_interfaces", lambda: base)
+    rt.known_ifaces = {i["name"] for i in base}
+    extra = base + [{"name": "eth9", "type": "ethernet", "bus": "usb", "driver": "r8152", "mac": "02:00:00:00:09:09",
+                     "carrier": False, "speed": None, "rx": 0, "tx": 0, "addrs": [], "phy": None}]
+    monkeypatch.setattr(netdev_mod, "list_interfaces", lambda: extra)
+    rt.hotplug_tick()
+    assert rt.store.get()["interfaces"]["eth9"] == {"role": "unused"}
+    assert any("eth9" in e["msg"] and e["kind"] == "hotplug" for e in rt.events)
+
+    monkeypatch.setattr(netdev_mod, "list_interfaces", lambda: base)
+    rt.hotplug_tick()
+    assert any("cikarildi" in e["msg"] and "eth9" in e["msg"] for e in rt.events)
+    assert rt.store.get()["interfaces"]["eth9"]["role"] == "unused"      # yapilandirma korunur
+
+
+def test_events_since_is_monotonic():
+    from r1kit.runtime import Runtime
+    rt = Runtime()
+    rt.event("a")
+    rt.event("b")
+    ids = [e["id"] for e in rt.events]
+    assert ids == sorted(ids)
+    assert len(rt.events_since(ids[0])) == 1
+
+
+def test_qr_endpoints_serve_svg_from_saved_config():
+    import http.client
+    import threading
+    from r1kit import web
+    from r1kit.runtime import Runtime
+    rt = Runtime()
+    preset = cfg_for("router")
+    preset["admin"], preset["system"] = rt.store.get()["admin"], rt.store.get()["system"]
+    rt.store.set(preset)
+    rt.set_password("qr-test-pass-1")
+
+    srv = web.Server(("127.0.0.1", 0), web.make_handler(rt))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+
+    def call(method, path, headers=None):
+        c = http.client.HTTPConnection("localhost", port)
+        c.request(method, path, None, dict({"Host": "localhost"}, **(headers or {})))
+        r = c.getresponse()
+        return r.status, r.read()
+
+    c = http.client.HTTPConnection("localhost", port)
+    c.request("POST", "/api/login", json.dumps({"password": "qr-test-pass-1"}), {"Host": "localhost"})
+    ck = c.getresponse().getheader("Set-Cookie").split(";")[0]
+
+    st, body = call("GET", "/api/qr/wifi/wlan0.svg", {"Cookie": ck})
+    assert st == 200 and body.startswith(b"<svg")
+    st, body = call("GET", "/api/qr/panel.svg", {"Cookie": ck})
+    assert st == 200 and body.startswith(b"<svg")
+    st, _ = call("GET", "/api/qr/wifi/does-not-exist.svg", {"Cookie": ck})
+    assert st == 404
+    srv.shutdown()
+
+
+def test_sse_events_stream_sends_status_promptly():
+    import socket
+    import threading
+    from r1kit import web
+    from r1kit.runtime import Runtime
+    rt = Runtime()
+    preset = cfg_for("router")
+    preset["admin"], preset["system"] = rt.store.get()["admin"], rt.store.get()["system"]
+    rt.store.set(preset)
+    rt.mdns = None
+    rt.set_password("sse-test-pass-1")
+
+    srv = web.Server(("127.0.0.1", 0), web.make_handler(rt))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+
+    import http.client
+    c = http.client.HTTPConnection("localhost", port)
+    c.request("POST", "/api/login", json.dumps({"password": "sse-test-pass-1"}), {"Host": "localhost", "Content-Type": "application/json"})
+    ck = c.getresponse().getheader("Set-Cookie").split(";")[0]
+
+    s = socket.create_connection(("localhost", port), timeout=5)
+    s.sendall(("GET /api/events HTTP/1.1\r\nHost: localhost\r\nCookie: %s\r\nConnection: close\r\n\r\n" % ck).encode())
+    s.settimeout(5)
+    chunk = s.recv(4096).decode(errors="ignore")
+    assert "200" in chunk.splitlines()[0]
+    assert "text/event-stream" in chunk
+    assert "event: status" in chunk
+    s.close()
+    rt.stop.set()
+    srv.shutdown()

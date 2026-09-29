@@ -1,4 +1,5 @@
-"""Minik yakalayici DNS: yetkisiz portal istemcilerinin tum A sorgularini router IP'sine cevaplar (UDP 5353)."""
+"""Minik yakalayici DNS: yetkisiz portal istemcilerinin tum A sorgularini router IP'sine cevaplar.
+nftables bu port'a yonlendirir (bkz. render.PORTAL_DNS_PORT); gercek mDNS (5353) ile karismasin diye ayri porttur."""
 import ipaddress
 import logging
 import socket
@@ -8,7 +9,7 @@ import threading
 log = logging.getLogger("r1kit.dns")
 
 
-def build_reply(data, ip):
+def build_reply(data, ip, ttl=10):
     if len(data) < 12:
         return None
     tid = data[:2]
@@ -22,12 +23,12 @@ def build_reply(data, ip):
     hdr = tid + b"\x81\x80" + b"\x00\x01" + (b"\x00\x01" if qtype == 1 else b"\x00\x00") + b"\x00\x00\x00\x00"
     ans = b""
     if qtype == 1:
-        ans = b"\xc0\x0c\x00\x01\x00\x01" + struct.pack("!I", 10) + b"\x00\x04" + socket.inet_aton(ip)
+        ans = b"\xc0\x0c\x00\x01\x00\x01" + struct.pack("!I", ttl) + b"\x00\x04" + socket.inet_aton(ip)
     return hdr + q + ans
 
 
 class PortalDNS(threading.Thread):
-    def __init__(self, rt, port=5353):
+    def __init__(self, rt, port=5390):
         super().__init__(daemon=True)
         self.rt, self.port = rt, port
 

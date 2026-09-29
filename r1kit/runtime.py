@@ -39,6 +39,11 @@ class Runtime:
         self.started = time.time()
         self.last_apply = None
         self.stop = threading.Event()
+        self.events = collections.deque(maxlen=200)     # donanim/sistem olaylari (SSE + panel icin)
+        self.event_seq = 0
+        self.known_ifaces = set(netdev.suggest_roles(netdev.list_interfaces())["wired"] +
+                                 netdev.suggest_roles(netdev.list_interfaces())["wifi"])
+        self.mdns = None                  # daemon.py tarafindan baglanir (varsa apply() sonrasi rejoin edilir)
         self.first_run_password = self._ensure_admin()
         self.first_run_wifi = self._ensure_defaults()
 
@@ -96,6 +101,34 @@ class Runtime:
         if rc != 0 and c.alt:
             self.run_cmd(c.alt)
 
+    def event(self, msg, kind="info"):
+        self.event_seq += 1
+        self.events.append({"id": self.event_seq, "t": int(time.time()), "kind": kind, "msg": msg})
+
+    # -------------------------------------------------------------------- takilan/cikarilan donanim
+    def hotplug_tick(self):
+        """Calisirken USB Ethernet/Wi-Fi takilip cikarilmasini algilar; yeni arayuzleri otomatik
+        olarak (rol atamadan, 'unused' olarak) yapilandirmaya ekler ki panelde hemen gorunsunler."""
+        hw = netdev.list_interfaces()
+        now = {i["name"]: i for i in hw}
+        added, removed = set(now) - self.known_ifaces, self.known_ifaces - set(now)
+        if not added and not removed:
+            return
+        cfg = self.store.get()
+        changed = False
+        for name in added:
+            i = now[name]
+            self.event("Yeni arayuz bulundu: %s (%s, %s) - Arayuzler sekmesinden rol atayin" %
+                       (name, i["type"], i["bus"]), "hotplug")
+            if name not in cfg["interfaces"]:
+                cfg["interfaces"][name] = {"role": "unused"}
+                changed = True
+        for name in removed:
+            self.event("Arayuz cikarildi: %s (yapilandirmasi korunuyor)" % name, "hotplug")
+        if changed:
+            self.store.set(cfg)
+        self.known_ifaces = set(now)
+
     # -------------------------------------------------------------------- apply
     def apply(self, safe=False, confirm_s=90):
         with self.apply_lock:
@@ -126,6 +159,9 @@ class Runtime:
             self.client_sig = None
             self._save_applied(cfg, topo)
             self.last_apply = time.time()
+            if self.mdns:
+                self.mdns.rejoin()
+            self.event("Yapilandirma uygulandi (%s)" % (", ".join(plan.procs) or "servis yok"), "apply")
             if safe and prev is not None:
                 self._arm_rollback(prev, confirm_s)
             return {"ok": True, "procs": list(plan.procs), "warnings": plan.warnings,
@@ -167,6 +203,7 @@ class Runtime:
 
     def _rollback(self, prev):
         log.warning("guvenli uygulama onaylanmadi: onceki yapilandirmaya donuluyor")
+        self.event("Onaylanmadi: onceki yapilandirmaya otomatik geri donuldu", "warn")
         self.pending = None
         try:
             self.store.set(prev, backup=False)
@@ -354,7 +391,11 @@ class Runtime:
         return {"version": __version__, "uptime": int(time.time() - self.started), "hostname": cfg["system"]["hostname"],
                 "procs": self.sup.status(), "pending_confirm": int(self.pending["deadline"] - time.time()) if self.pending else 0,
                 "last_apply": self.last_apply, "last": self.samples[-1] if self.samples else None,
-                "uplinks": self.uplinks.status(), "authed": len(self.authed), "dry": sysutil.DRY}
+                "uplinks": self.uplinks.status(), "authed": len(self.authed), "dry": sysutil.DRY,
+                "events": list(self.events)[-30:][::-1], "mdns": "%s.local" % cfg["system"]["hostname"] if self.mdns else None}
+
+    def events_since(self, last_id):
+        return [e for e in self.events if e["id"] > last_id]
 
     # -------------------------------------------------------------------- doctor
     def doctor(self):

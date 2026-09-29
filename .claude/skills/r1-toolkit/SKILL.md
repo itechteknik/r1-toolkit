@@ -10,8 +10,14 @@ description: Orange Pi R1 toolkit'ini (r1kit) gelistirirken veya cihaz uzerinde 
 Render **saf**dir (yan etkisiz); tum degisiklikler `tests/` ile cihaz olmadan test edilir.
 - `render.py` cekirdek: koprüler, hostapd, wpa_supplicant, dnsmasq, nftables temeli.
 - `skills/*.py` eklentiler: `Skill` alt sinifi + `@register`; `render()` plana kural/surec ekler, `actions()` API'den cagrilan araclar sunar.
-- `uplink.py` cok-WAN (saglik, failover, multipath). `runtime.py` apply/guvenli-geri-alma/portal yetkisi/istemciler.
-- `web.py` portal + yonetici API (CSRF + oturum), `static/` panel (innerHTML KULLANMA, `h()` yardimcisi).
+- `uplink.py` cok-WAN (saglik, failover, multipath). `runtime.py` apply/guvenli-geri-alma/portal yetkisi/istemciler/hotplug/olay-gunlugu.
+- `web.py` portal + yonetici API (CSRF + oturum) + `/api/events` (SSE canli akis), `static/` panel (innerHTML KULLANMA, `h()` yardimcisi).
+- `mdns.py` minik mDNS yanitlayici (`http://<hostname>.local/`), `qrcode.py` bagimsiz QR ureteci (bayt modu, v1-10, ECC-M; WiFi baglanti/panel QR'lari icin).
+
+## Dinamik/donanim ozellikleri (dikkatli dokunun)
+- `Runtime.hotplug_tick()` (daemon.py'de 3sn'de bir cagrilir) donanimi `netdev.list_interfaces()` ile karsilastirir; yeni arayuzu `role: unused` olarak config'e ekler, `rt.event(...)` ile olay kaydeder. Testte `monkeypatch.setattr(netdev, "list_interfaces", ...)` ile simule edilir.
+- `rt.events` (deque, `rt.event(msg, kind)`) hem `/api/state`'te hem `/api/events` SSE akisinda gorunur; `rt.events_since(last_id)` artan id ile.
+- `qrcode.py` degistirilecekse MUTLAKA cv2 (`pip install opencv-python-headless numpy`) ile uctan uca dogrulayin - el yazisi bit hatalari sessizce "okunmayan QR" uretir. `tests/test_qrcode.py` bu yontemi kullanir (cv2 yoksa sadece yapisal testler calisir).
 
 ## Yeni skill ekleme
 1. `r1kit/skills/<ad>.py`: `@register class X(Skill)`; `fields=[F(...)]` UI formunu otomatik uretir.

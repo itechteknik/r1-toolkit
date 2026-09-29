@@ -9,7 +9,7 @@ from .plan import C, Plan
 from .skills import base as skillbase
 
 HOOK = "/usr/local/lib/r1kit/dhcp-hook.sh"
-PORTAL_DNS_PORT = 5353
+PORTAL_DNS_PORT = 5390  # 5353 gercek mDNS (r1kit.mdns) icin ayrildi
 
 
 class Topology:

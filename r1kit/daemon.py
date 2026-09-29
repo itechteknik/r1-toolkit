@@ -6,6 +6,7 @@ import threading
 import time
 
 from . import sysutil, web
+from .mdns import MDNSResponder
 from .portaldns import PortalDNS
 from .runtime import Runtime
 
@@ -32,6 +33,8 @@ def main():
     ports = [int(p) for p in os.environ.get("R1KIT_PORTS", "80,8080").split(",")]
     web.serve(rt, ports)
     PortalDNS(rt).start()
+    rt.mdns = MDNSResponder(rt)
+    rt.mdns.start()
     try:
         rt.apply()
     except Exception:
@@ -40,6 +43,7 @@ def main():
     loop(rt, rt.store.get()["uplink"]["interval"], rt.uplinks.tick, "uplinks")
     loop(rt, 5, rt.sample, "metrics")
     loop(rt, 15, rt.apply_client_policy, "clientpolicy")
+    loop(rt, 3, rt.hotplug_tick, "hotplug")
     for s in (signal.SIGTERM, signal.SIGINT):
         signal.signal(s, lambda *_: rt.stop.set())
     rt.stop.wait()

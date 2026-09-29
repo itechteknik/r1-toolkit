@@ -9,7 +9,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-from . import auth, config, netdev, presets, sysutil
+from . import auth, config, netdev, presets, qrcode, sysutil
 from .skills import REGISTRY
 
 log = logging.getLogger("r1kit.web")
@@ -143,6 +143,8 @@ def make_handler(rt):
                     return self._send(204, b"", "image/x-icon")
                 if u.path == "/capport":
                     return self._send(200, {"captive": self._is_unauth(), "user-portal-url": self._portal_url()}, "application/captive+json")
+                if u.path == "/api/events" and self.command == "GET":
+                    return self.sse_events()
                 if u.path.startswith("/api/"):
                     return self._send(*self.api(u))
                 return self.static(u.path)
@@ -169,6 +171,36 @@ def make_handler(rt):
                 return self._send(404, b"not found", "text/plain")
             with open(os.path.join(STATIC, name), "rb") as f:
                 self._send(200, f.read(), MIME.get(os.path.splitext(name)[1], "application/octet-stream"))
+
+        def sse_events(self):
+            """Canli durum akisi (Server-Sent Events): panel 5sn'lik yoklama yerine bunu dinler.
+            Her ~2sn 'status', ve olustukca 'event' (hotplug/uplink/apply) mesaji gonderir."""
+            if not self._session():
+                raise ApiError(401, "oturum gerekli")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            hdr = self.headers.get("Last-Event-ID")
+            q = (parse_qs(urlparse(self.path).query).get("last_id") or ["0"])[0]
+            last_id = int(hdr or q or 0)
+            try:
+                for _ in range(150):                          # ~5 dk sonra istemci yeniden baglanir
+                    if rt.stop.is_set():
+                        break
+                    for e in rt.events_since(last_id):
+                        last_id = e["id"]
+                        self.wfile.write(("id: %d\nevent: hotplug\ndata: %s\n\n" % (e["id"], json.dumps(e))).encode())
+                    self.wfile.write(("event: status\ndata: %s\n\n" % json.dumps(rt.status())).encode())
+                    self.wfile.flush()
+                    self.close_connection = rt.stop.wait(2)
+                    if self.close_connection:
+                        break
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            self.close_connection = True
 
         # ---- API -------------------------------------------------------------
         def api(self, u):
@@ -303,6 +335,17 @@ def make_handler(rt):
                 return 200, {"ok": True}
             if p == "doctor" and m == "GET":
                 return 200, {"checks": rt.doctor()}
+            mm = re.fullmatch(r"qr/wifi/([A-Za-z0-9_.:-]{1,15})\.svg", p)
+            if mm and m == "GET":
+                s = cfg["interfaces"].get(mm.group(1))
+                if not s or s.get("role") != "ap":
+                    raise ApiError(404, "boyle bir Wi-Fi AP arayuzu yok")
+                payload = qrcode.wifi_payload(s["ssid"], s.get("psk", ""), s.get("security", "wpa2"), s.get("hidden", False))
+                return 200, qrcode.to_svg(payload), "image/svg+xml"
+            if p == "qr/panel.svg" and m == "GET":
+                net = next((n for n in rt.topo().nets.values() if n["iface"]), None)
+                url = "http://%s.local/" % cfg["system"]["hostname"] if rt.mdns else "http://%s/" % (net["iface"].ip if net else cfg["system"]["hostname"])
+                return 200, qrcode.to_svg(url), "image/svg+xml"
             if p == "logs" and m == "GET":
                 rc, out = sysutil.run(["journalctl", "-u", "r1kit", "-n", "200", "--no-pager", "-o", "short"], ignore=True)
                 return 200, {"log": out}
